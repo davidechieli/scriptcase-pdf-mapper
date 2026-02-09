@@ -334,6 +334,35 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
         .bool-choice-buttons button:hover {
             background: #eee;
         }
+
+        /* Modal scelta indice per enum */
+        .enum-choice-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(0, 0, 0, 0.4);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+        .enum-choice-overlay.visible {
+            display: flex;
+        }
+        .enum-choice-modal {
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+            padding: 20px;
+            min-width: 280px;
+        }
+        .enum-choice-modal h4 { margin: 0 0 12px 0; font-size: 14px; }
+        .enum-choice-modal label { display: block; margin-bottom: 6px; font-size: 12px; }
+        .enum-choice-modal input[type="number"] { width: 100%; padding: 8px; margin-bottom: 12px; box-sizing: border-box; }
+        .enum-choice-modal button { padding: 10px 14px; border: 1px solid #ccc; border-radius: 4px; background: #fafafa; cursor: pointer; font-size: 13px; width: 100%; }
+        .enum-choice-modal button:hover { background: #eee; }
     </style>
 </head>
 <body>
@@ -380,6 +409,15 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
             <button type="button" id="boolChoiceCheckbox">Checkbox (1 posizione)</button>
             <button type="button" id="boolChoiceRadio">Radio Sì/No (2 posizioni)</button>
         </div>
+    </div>
+</div>
+
+<div id="enumChoiceOverlay" class="enum-choice-overlay">
+    <div class="enum-choice-modal">
+        <h4 id="enumChoiceTitle">Indice per il campo</h4>
+        <label for="enumIndexInput">Indice (numero &ge; 1):</label>
+        <input type="number" id="enumIndexInput" min="1" value="1">
+        <button type="button" id="enumChoiceAddBtn">Aggiungi</button>
     </div>
 </div>
 
@@ -451,6 +489,11 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
     var boolChoiceRadioBtn = document.getElementById('boolChoiceRadio');
     var pendingBoolTemplate = null;
 
+    var enumChoiceOverlay = document.getElementById('enumChoiceOverlay');
+    var enumIndexInput = document.getElementById('enumIndexInput');
+    var enumChoiceAddBtn = document.getElementById('enumChoiceAddBtn');
+    var pendingEnumTemplate = null;
+
     var canvasContext = canvas.getContext('2d');
 
     // --------------------------------------------------------------------
@@ -512,6 +555,8 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
                 item.addEventListener('click', function (evt) {
                     if (template.type_id === 'bool') {
                         showBoolChoiceModal(template);
+                    } else if (template.type_id === 'enum') {
+                        showEnumChoiceModal(template);
                     } else {
                         addFieldFromTemplate(templateId);
                     }
@@ -619,14 +664,12 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
     function addBoolFieldAsRadio(tpl) {
         if (!tpl) { hideBoolChoiceModal(); return; }
         var base = tpl.placeholder_name;
-        var nameTrue = base + '_true';
-        var nameFalse = base + '_false';
         for (var pageKey in pageFields) {
             if (!pageFields.hasOwnProperty(pageKey)) continue;
             var list = pageFields[pageKey];
             for (var j = 0; j < list.length; j++) {
-                var pn = list[j].placeholder_name;
-                if (pn === nameTrue || pn === nameFalse) {
+                var inst = list[j];
+                if (inst.basePlaceholder === base && (inst.index === 0 || inst.index === 1)) {
                     alert('Esiste già un campo "' + (tpl.name || base) + '" (radio Sì/No). Rimuovere entrambe le posizioni prima di aggiungerne di nuove.');
                     hideBoolChoiceModal();
                     return;
@@ -638,7 +681,8 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
         var instTrue = {
             id: generateInstanceId(),
             basePlaceholder: base,
-            placeholder_name: nameTrue,
+            placeholder_name: base,
+            index: 1,
             type_id: 'bool',
             page: currentPage,
             xPx: d.marginX,
@@ -649,7 +693,8 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
         var instFalse = {
             id: generateInstanceId(),
             basePlaceholder: base,
-            placeholder_name: nameFalse,
+            placeholder_name: base,
+            index: 0,
             type_id: 'bool',
             page: currentPage,
             xPx: d.marginX,
@@ -667,6 +712,75 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
         hideBoolChoiceModal();
     }
 
+    function getMaxEnumIndexForBase(base) {
+        var maxIdx = 0;
+        for (var pageKey in pageFields) {
+            if (!pageFields.hasOwnProperty(pageKey)) continue;
+            var list = pageFields[pageKey];
+            for (var j = 0; j < list.length; j++) {
+                if (list[j].basePlaceholder === base && list[j].index != null && list[j].index > maxIdx) {
+                    maxIdx = list[j].index;
+                }
+            }
+        }
+        return maxIdx;
+    }
+
+    function showEnumChoiceModal(tpl) {
+        pendingEnumTemplate = tpl;
+        var suggested = getMaxEnumIndexForBase(tpl.placeholder_name) + 1;
+        if (enumIndexInput) {
+            enumIndexInput.value = suggested;
+            enumIndexInput.min = 1;
+        }
+        if (enumChoiceOverlay) {
+            enumChoiceOverlay.classList.add('visible');
+        }
+    }
+
+    function hideEnumChoiceModal() {
+        pendingEnumTemplate = null;
+        if (enumChoiceOverlay) {
+            enumChoiceOverlay.classList.remove('visible');
+        }
+    }
+
+    function addEnumFieldWithIndex(tpl, index) {
+        if (!tpl) { hideEnumChoiceModal(); return; }
+        if (index == null || index < 1) {
+            alert('Indice non valido. Inserire un numero >= 1.');
+            return;
+        }
+        var metrics = pageMetrics[currentPage];
+        if (!metrics) {
+            var approxPxPerMm = 3.78;
+            metrics = { mmWidth: 0, mmHeight: 0, pxPerMmX: approxPxPerMm, pxPerMmY: approxPxPerMm };
+        }
+        var defaultWidthMm = 100;
+        var defaultHeightMm = 6;
+        var widthPx = defaultWidthMm * metrics.pxPerMmX;
+        var heightPx = defaultHeightMm * metrics.pxPerMmY;
+        var marginX = 10;
+        var marginY = 40;
+        var instance = {
+            id: generateInstanceId(),
+            basePlaceholder: tpl.placeholder_name,
+            placeholder_name: tpl.placeholder_name,
+            index: index,
+            type_id: 'enum',
+            page: currentPage,
+            xPx: marginX,
+            yPx: marginY,
+            widthPx: widthPx,
+            heightPx: heightPx
+        };
+        ensurePageArray(currentPage);
+        pageFields[currentPage].push(instance);
+        fieldInstancesById[instance.id] = instance;
+        renderFieldInstance(instance);
+        hideEnumChoiceModal();
+    }
+
     // --------------------------------------------------------------------
     // Aggiunta e rendering dei campi sulla pagina corrente
     // --------------------------------------------------------------------
@@ -677,13 +791,7 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
         }
 
         var baseName = tpl.placeholder_name;
-        var idx = (placeholderCounters[baseName] || 0) + 1;
-        placeholderCounters[baseName] = idx;
 
-        var finalPlaceholder = baseName + '_idx_' + idx;
-
-        // Se le metriche della pagina non sono ancora state calcolate,
-        // usiamo un fallback approssimativo basato su ~96 DPI (3.78 px/mm).
         var metrics = pageMetrics[currentPage];
         if (!metrics) {
             var approxPxPerMm = 3.78;
@@ -695,19 +803,17 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
             };
         }
 
-        // Dimensioni predefinite: 100mm x 6mm
         var defaultWidthMm = 100;
         var defaultHeightMm = 6;
         var widthPx = defaultWidthMm * metrics.pxPerMmX;
         var heightPx = defaultHeightMm * metrics.pxPerMmY;
-        // Margine leggermente più basso per non sovrapporsi al bordo superiore del PDF
         var marginX = 10;
         var marginY = 40;
 
         var instance = {
             id: generateInstanceId(),
             basePlaceholder: baseName,
-            placeholder_name: finalPlaceholder,
+            placeholder_name: baseName,
             type_id: tpl.type_id,
             page: currentPage,
             xPx: marginX,
@@ -769,10 +875,10 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
         var tpl = getTemplateByPlaceholder(instance.basePlaceholder);
         var typeId = (tpl && tpl.type_id != null) ? tpl.type_id : instance.type_id;
         var displayName = (tpl && tpl.name) ? tpl.name : instance.placeholder_name;
-        if (/_true$/.test(instance.placeholder_name)) {
-            displayName = ((tpl && tpl.name) ? tpl.name : instance.basePlaceholder) + ' (Sì)';
-        } else if (/_false$/.test(instance.placeholder_name)) {
-            displayName = ((tpl && tpl.name) ? tpl.name : instance.basePlaceholder) + ' (No)';
+        if (instance.type_id === 'bool' && instance.index !== undefined && instance.index != null) {
+            displayName = ((tpl && tpl.name) ? tpl.name : instance.basePlaceholder) + (instance.index === 1 ? ' (Sì)' : ' (No)');
+        } else if (instance.index != null) {
+            displayName = ((tpl && tpl.name) ? tpl.name : instance.basePlaceholder) + ' (indice ' + instance.index + ')';
         }
 
         var labelSpan = document.createElement('span');
@@ -928,6 +1034,15 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
             if (match) {
                 suffixIndex = parseInt(match[2], 10);
             }
+            var resolvedBoolIndex = null;
+            if (/_true$/.test(fullPlaceholder)) {
+                resolvedBoolIndex = 1;
+            } else if (/_false$/.test(fullPlaceholder)) {
+                resolvedBoolIndex = 0;
+            }
+
+            var hasIndex = item.index != null || suffixIndex != null || resolvedBoolIndex != null;
+            var storedPlaceholderName = hasIndex ? basePlaceholder : fullPlaceholder;
 
             var tpl = getTemplateByPlaceholder(basePlaceholder);
             var typeId = tpl && typeof tpl.type_id !== 'undefined' ? tpl.type_id : (item.type_id || 'string');
@@ -935,7 +1050,7 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
             var instance = {
                 id: generateInstanceId(),
                 basePlaceholder: basePlaceholder,
-                placeholder_name: fullPlaceholder,
+                placeholder_name: storedPlaceholderName,
                 type_id: typeId,
                 page: page,
                 xPx: xMm * metrics.pxPerMmX,
@@ -943,17 +1058,13 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
                 widthPx: widthMm * metrics.pxPerMmX,
                 heightPx: heightMm * metrics.pxPerMmY
             };
+            if (hasIndex) {
+                instance.index = item.index != null ? item.index : (suffixIndex != null ? suffixIndex : resolvedBoolIndex);
+            }
 
             ensurePageArray(page);
             pageFields[page].push(instance);
             fieldInstancesById[instance.id] = instance;
-
-            if (suffixIndex !== null) {
-                var current = placeholderCounters[basePlaceholder] || 0;
-                if (suffixIndex > current) {
-                    placeholderCounters[basePlaceholder] = suffixIndex;
-                }
-            }
         }
     }
 
@@ -989,6 +1100,9 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
                     },
                     unita: 'mm'
                 };
+                if (inst.index != null) {
+                    item.index = inst.index;
+                }
 
                 result.push(item);
             }
@@ -1113,6 +1227,24 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
         if (boolChoiceRadioBtn) {
             boolChoiceRadioBtn.addEventListener('click', function () {
                 if (pendingBoolTemplate) { addBoolFieldAsRadio(pendingBoolTemplate); }
+            });
+        }
+
+        if (enumChoiceOverlay) {
+            enumChoiceOverlay.addEventListener('click', function (e) {
+                if (e.target === enumChoiceOverlay) { hideEnumChoiceModal(); }
+            });
+        }
+        if (enumChoiceAddBtn && enumIndexInput) {
+            enumChoiceAddBtn.addEventListener('click', function () {
+                if (pendingEnumTemplate) {
+                    var idx = parseInt(enumIndexInput.value, 10);
+                    if (isNaN(idx) || idx < 1) {
+                        alert('Inserire un indice valido (numero >= 1).');
+                        return;
+                    }
+                    addEnumFieldWithIndex(pendingEnumTemplate, idx);
+                }
             });
         }
 
