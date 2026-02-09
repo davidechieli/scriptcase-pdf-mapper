@@ -5,22 +5,21 @@ $template_id = [glo_template_id];
 // mi prendo tutti gli attributi comuni e specifici per istituto id
 sc_select(attributesRs, "SELECT a.id, a.placeholder_name, a.type_id, a.nome FROM `istituti_attributi` ia
 RIGHT JOIN attributi a ON a.id = ia.attributo_id
-WHERE istituto_id = (SELECT istituto_id FROM template WHERE id = $template_id) OR a.is_common = 1;");
+WHERE istituto_id = (SELECT istituto_id FROM template WHERE id = " . (int)$template_id . ") OR a.is_common = 1;");
 
 $attributes = [];
 
-if (!empty({attributesRs}) && !{attributesRs}->EOF) {
+if ({attributesRs} !== false && !{attributesRs}->EOF) {
     while (!{attributesRs}->EOF) {
-
         $attributes[] = [
-            'id'               => {attributesRs}->fields[0], // a.id
-            'placeholder_name' => {attributesRs}->fields[1], // a.placeholder_name
-            'type_id'          => {attributesRs}->fields[2], // a.type_id
-			'name'         	   => {attributesRs}->fields[3], // a.nome
+            'id'               => (int)({attributesRs}->fields[0]),   // a.id (numerico)
+            'placeholder_name' => {attributesRs}->fields[1],       // a.placeholder_name
+            'type_id'          => (string)({attributesRs}->fields[2]), // a.type_id ("string","bool","int" ecc.)
+            'name'             => {attributesRs}->fields[3],       // a.nome (etichetta)
         ];
-
         {attributesRs}->MoveNext();
     }
+    {attributesRs}->Close();
 }
 
 // JSON finale
@@ -246,6 +245,22 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
             color: #555;
         }
 
+        .pdf-field .field-remove {
+            position: absolute;
+            top: -6px;
+            right: -6px;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background-color: #e53935;
+            color: #fff;
+            font-size: 10px;
+            line-height: 14px;
+            text-align: center;
+            cursor: pointer;
+            box-shadow: 0 0 2px rgba(0,0,0,0.4);
+        }
+
         /* Gestione dei cursori per drag & resize */
         .pdf-field.interact-resizable {
             box-sizing: border-box;
@@ -268,6 +283,56 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
             margin-top: 8px;
             font-size: 11px;
             color: #666;
+        }
+
+        /* Modal scelta bool: checkbox vs radio */
+        .bool-choice-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(0, 0, 0, 0.4);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+        .bool-choice-overlay.visible {
+            display: flex;
+        }
+        .bool-choice-modal {
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+            padding: 20px;
+            min-width: 280px;
+        }
+        .bool-choice-modal h4 {
+            margin: 0 0 12px 0;
+            font-size: 14px;
+        }
+        .bool-choice-modal p {
+            margin: 0 0 16px 0;
+            font-size: 12px;
+            color: #666;
+        }
+        .bool-choice-buttons {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .bool-choice-buttons button {
+            padding: 10px 14px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background: #fafafa;
+            cursor: pointer;
+            font-size: 13px;
+            text-align: left;
+        }
+        .bool-choice-buttons button:hover {
+            background: #eee;
         }
     </style>
 </head>
@@ -307,6 +372,17 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
     <input type="hidden" name="pdf_url" id="pdf_url" value="<?php echo htmlspecialchars($pdf_url, ENT_QUOTES, 'UTF-8'); ?>">
 </form>
 
+<div id="boolChoiceOverlay" class="bool-choice-overlay">
+    <div class="bool-choice-modal">
+        <h4 id="boolChoiceTitle">Come aggiungere il campo?</h4>
+        <p id="boolChoiceDesc">Scegli se posizionare un solo rettangolo (checkbox) o due (Sì/No).</p>
+        <div class="bool-choice-buttons">
+            <button type="button" id="boolChoiceCheckbox">Checkbox (1 posizione)</button>
+            <button type="button" id="boolChoiceRadio">Radio Sì/No (2 posizioni)</button>
+        </div>
+    </div>
+</div>
+
 <!-- pdf.js (core) - usare una versione UMD (non ES module) -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
 <!-- interact.js -->
@@ -343,7 +419,7 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
     var pageMetrics = {};
 
     // Struttura per i campi per pagina:
-    // pageFields[page] = [ { id, basePlaceholder, placeholder_name, type_id, page, xPx, yPx, widthPx, heightPx }, ... ]
+    // pageFields[page] = [ { id, basePlaceholder, placeholder_name, type_id (string), page, xPx, yPx, widthPx, heightPx }, ... ]
     var pageFields = {};
 
     // Mappa ID -> istanza
@@ -354,6 +430,7 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
 
     // Id incrementale per istanze
     var lastInstanceId = 0;
+    var selectedFieldId = null;
 
     // Scala fissa per il rendering PDF
     var FIXED_SCALE = 1.3;
@@ -369,12 +446,17 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
     var btnSave = document.getElementById('btnSave');
     var formEl = document.getElementById('mappingForm');
 
+    var boolChoiceOverlay = document.getElementById('boolChoiceOverlay');
+    var boolChoiceCheckboxBtn = document.getElementById('boolChoiceCheckbox');
+    var boolChoiceRadioBtn = document.getElementById('boolChoiceRadio');
+    var pendingBoolTemplate = null;
+
     var canvasContext = canvas.getContext('2d');
 
     // --------------------------------------------------------------------
-    // Campi predefiniti (lista statica)
+    // Campi (attributi da DB)
     // --------------------------------------------------------------------
-    var fieldTemplates = <?php echo $attributes_json; ?>
+    var fieldTemplates = <?php echo $attributes_json; ?> || [];
 
     // --------------------------------------------------------------------
     // Helper
@@ -417,7 +499,7 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
 
             var nameSpan = document.createElement('span');
             nameSpan.className = 'field-name';
-            nameSpan.textContent = tpl.name;
+            nameSpan.textContent = tpl.name || tpl.placeholder_name || '';
 
             var typeSpan = document.createElement('span');
             typeSpan.className = 'field-type';
@@ -426,18 +508,24 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
             item.appendChild(nameSpan);
             item.appendChild(typeSpan);
 
-            item.addEventListener('click', function (evt) {
-                var templateId = this.getAttribute('data-template-id');
-                addFieldFromTemplate(templateId);
-            });
+            (function (template, templateId) {
+                item.addEventListener('click', function (evt) {
+                    if (template.type_id === 'bool') {
+                        showBoolChoiceModal(template);
+                    } else {
+                        addFieldFromTemplate(templateId);
+                    }
+                });
+            })(tpl, tpl.id);
 
             fieldListEl.appendChild(item);
         }
     }
 
     function getTemplateById(templateId) {
+        var id = (typeof templateId === 'string') ? parseInt(templateId, 10) : templateId;
         for (var i = 0; i < fieldTemplates.length; i++) {
-            if (fieldTemplates[i].id === templateId) {
+            if (fieldTemplates[i].id === id || fieldTemplates[i].id == templateId) {
                 return fieldTemplates[i];
             }
         }
@@ -451,6 +539,132 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
             }
         }
         return null;
+    }
+
+    function getBasePlaceholderFromFull(fullPlaceholder) {
+        if (!fullPlaceholder) return '';
+        var m = fullPlaceholder.match(/^(.*)_idx_(\d+)$/);
+        if (m) return m[1];
+        if (/_true$/.test(fullPlaceholder)) return fullPlaceholder.replace(/_true$/, '');
+        if (/_false$/.test(fullPlaceholder)) return fullPlaceholder.replace(/_false$/, '');
+        return fullPlaceholder;
+    }
+
+    function showBoolChoiceModal(tpl) {
+        pendingBoolTemplate = tpl;
+        if (boolChoiceOverlay) {
+            boolChoiceOverlay.classList.add('visible');
+        }
+    }
+
+    function hideBoolChoiceModal() {
+        pendingBoolTemplate = null;
+        if (boolChoiceOverlay) {
+            boolChoiceOverlay.classList.remove('visible');
+        }
+    }
+
+    function getBoolMetricsAndDefaults() {
+        var metrics = pageMetrics[currentPage];
+        if (!metrics) {
+            var approxPxPerMm = 3.78;
+            metrics = {
+                mmWidth: 0,
+                mmHeight: 0,
+                pxPerMmX: approxPxPerMm,
+                pxPerMmY: approxPxPerMm
+            };
+        }
+        var defaultWidthMm = 100;
+        var defaultHeightMm = 6;
+        var widthPx = defaultWidthMm * metrics.pxPerMmX;
+        var heightPx = defaultHeightMm * metrics.pxPerMmY;
+        var marginX = 10;
+        var marginY = 40;
+        return { metrics: metrics, widthPx: widthPx, heightPx: heightPx, marginX: marginX, marginY: marginY };
+    }
+
+    function addBoolFieldAsCheckbox(tpl) {
+        if (!tpl) { hideBoolChoiceModal(); return; }
+        var key = tpl.placeholder_name;
+        for (var pageKey in pageFields) {
+            if (!pageFields.hasOwnProperty(pageKey)) continue;
+            var list = pageFields[pageKey];
+            for (var j = 0; j < list.length; j++) {
+                if (list[j].placeholder_name === key) {
+                    alert('Esiste già un campo "' + (tpl.name || key) + '" (checkbox). Rimuoverlo prima di aggiungerne un altro.');
+                    return;
+                }
+            }
+        }
+        var d = getBoolMetricsAndDefaults();
+        var instance = {
+            id: generateInstanceId(),
+            basePlaceholder: tpl.placeholder_name,
+            placeholder_name: tpl.placeholder_name,
+            type_id: 'bool',
+            page: currentPage,
+            xPx: d.marginX,
+            yPx: d.marginY,
+            widthPx: d.widthPx,
+            heightPx: d.heightPx
+        };
+        ensurePageArray(currentPage);
+        pageFields[currentPage].push(instance);
+        fieldInstancesById[instance.id] = instance;
+        renderFieldInstance(instance);
+        hideBoolChoiceModal();
+    }
+
+    function addBoolFieldAsRadio(tpl) {
+        if (!tpl) { hideBoolChoiceModal(); return; }
+        var base = tpl.placeholder_name;
+        var nameTrue = base + '_true';
+        var nameFalse = base + '_false';
+        for (var pageKey in pageFields) {
+            if (!pageFields.hasOwnProperty(pageKey)) continue;
+            var list = pageFields[pageKey];
+            for (var j = 0; j < list.length; j++) {
+                var pn = list[j].placeholder_name;
+                if (pn === nameTrue || pn === nameFalse) {
+                    alert('Esiste già un campo "' + (tpl.name || base) + '" (radio Sì/No). Rimuovere entrambe le posizioni prima di aggiungerne di nuove.');
+                    hideBoolChoiceModal();
+                    return;
+                }
+            }
+        }
+        var d = getBoolMetricsAndDefaults();
+        var marginY2 = d.marginY + d.heightPx + 4;
+        var instTrue = {
+            id: generateInstanceId(),
+            basePlaceholder: base,
+            placeholder_name: nameTrue,
+            type_id: 'bool',
+            page: currentPage,
+            xPx: d.marginX,
+            yPx: d.marginY,
+            widthPx: d.widthPx,
+            heightPx: d.heightPx
+        };
+        var instFalse = {
+            id: generateInstanceId(),
+            basePlaceholder: base,
+            placeholder_name: nameFalse,
+            type_id: 'bool',
+            page: currentPage,
+            xPx: d.marginX,
+            yPx: marginY2,
+            widthPx: d.widthPx,
+            heightPx: d.heightPx
+        };
+        ensurePageArray(currentPage);
+        pageFields[currentPage].push(instTrue);
+        pageFields[currentPage].push(instFalse);
+        fieldInstancesById[instTrue.id] = instTrue;
+        fieldInstancesById[instFalse.id] = instFalse;
+        renderFieldInstance(instTrue);
+        renderFieldInstance(instFalse);
+        hideBoolChoiceModal();
     }
 
     // --------------------------------------------------------------------
@@ -509,6 +723,28 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
         renderFieldInstance(instance);
     }
 
+    function removeInstanceById(instanceId) {
+        var inst = fieldInstancesById[instanceId];
+        if (!inst) {
+            return;
+        }
+        // Rimuovi dall'array della pagina
+        var list = pageFields[inst.page];
+        if (Array.isArray(list)) {
+            pageFields[inst.page] = list.filter(function (it) { return it.id !== instanceId; });
+        }
+        // Rimuovi dalla mappa
+        delete fieldInstancesById[instanceId];
+        // Rimuovi dall'albero DOM (se presente)
+        var el = overlay.querySelector('.pdf-field[data-id=\"' + instanceId + '\"]');
+        if (el && el.parentNode) {
+            el.parentNode.removeChild(el);
+        }
+        if (selectedFieldId === instanceId) {
+            selectedFieldId = null;
+        }
+    }
+
     function renderFieldInstance(instance) {
         if (instance.page !== currentPage) {
             // Verrà renderizzato quando si naviga su quella pagina
@@ -530,22 +766,37 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
         el.setAttribute('data-x', instance.xPx);
         el.setAttribute('data-y', instance.yPx);
 
+        var tpl = getTemplateByPlaceholder(instance.basePlaceholder);
+        var typeId = (tpl && tpl.type_id != null) ? tpl.type_id : instance.type_id;
+        var displayName = (tpl && tpl.name) ? tpl.name : instance.placeholder_name;
+        if (/_true$/.test(instance.placeholder_name)) {
+            displayName = ((tpl && tpl.name) ? tpl.name : instance.basePlaceholder) + ' (Sì)';
+        } else if (/_false$/.test(instance.placeholder_name)) {
+            displayName = ((tpl && tpl.name) ? tpl.name : instance.basePlaceholder) + ' (No)';
+        }
+
         var labelSpan = document.createElement('span');
         labelSpan.className = 'field-label';
-        labelSpan.textContent = instance.placeholder_name;
-
-        var tpl = getTemplateByPlaceholder(instance.basePlaceholder);
-        var typeId = instance.type_id;
-        if (tpl && typeof tpl.type_id !== 'undefined') {
-            typeId = tpl.type_id;
-        }
+        labelSpan.textContent = displayName;
 
         var typeSpan = document.createElement('span');
         typeSpan.className = 'field-type-badge';
-        typeSpan.textContent = '(' + typeId + ')';
+        typeSpan.textContent = '(' + (typeId || 'string') + ')';
 
         el.appendChild(labelSpan);
         el.appendChild(typeSpan);
+
+        // Pulsante di rimozione (icone "x")
+        (function (fieldId) {
+            var removeSpan = document.createElement('span');
+            removeSpan.className = 'field-remove';
+            removeSpan.textContent = '×';
+            removeSpan.addEventListener('click', function (e) {
+                e.stopPropagation();
+                removeInstanceById(fieldId);
+            });
+            el.appendChild(removeSpan);
+        })(instance.id);
 
         overlay.appendChild(el);
     }
@@ -671,17 +922,15 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
             if (!metrics) continue;
 
             var fullPlaceholder = item.placeholder_name || '';
-            var basePlaceholder = fullPlaceholder;
+            var basePlaceholder = getBasePlaceholderFromFull(fullPlaceholder);
             var suffixIndex = null;
-
             var match = fullPlaceholder.match(/^(.*)_idx_(\d+)$/);
             if (match) {
-                basePlaceholder = match[1];
                 suffixIndex = parseInt(match[2], 10);
             }
 
             var tpl = getTemplateByPlaceholder(basePlaceholder);
-            var typeId = tpl && typeof tpl.type_id !== 'undefined' ? tpl.type_id : (item.type_id || 1);
+            var typeId = tpl && typeof tpl.type_id !== 'undefined' ? tpl.type_id : (item.type_id || 'string');
 
             var instance = {
                 id: generateInstanceId(),
@@ -850,6 +1099,22 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
         });
 
         btnSave.addEventListener('click', handleSaveClick);
+
+        if (boolChoiceOverlay) {
+            boolChoiceOverlay.addEventListener('click', function (e) {
+                if (e.target === boolChoiceOverlay) { hideBoolChoiceModal(); }
+            });
+        }
+        if (boolChoiceCheckboxBtn) {
+            boolChoiceCheckboxBtn.addEventListener('click', function () {
+                if (pendingBoolTemplate) { addBoolFieldAsCheckbox(pendingBoolTemplate); }
+            });
+        }
+        if (boolChoiceRadioBtn) {
+            boolChoiceRadioBtn.addEventListener('click', function () {
+                if (pendingBoolTemplate) { addBoolFieldAsRadio(pendingBoolTemplate); }
+            });
+        }
 
         if (!PDF_URL) {
             updateStatus('Nessun PDF definito.');
