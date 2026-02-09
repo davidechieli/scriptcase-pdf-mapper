@@ -1,8 +1,31 @@
-<?php
 // ----------------------------------------------------
 // GESTIONE SUBMIT FORM MAPPING
 // ----------------------------------------------------
 $template_id = [glo_template_id];
+// mi prendo tutti gli attributi comuni e specifici per istituto id
+sc_select(attributesRs, "SELECT a.id, a.placeholder_name, a.type_id, a.nome FROM `istituti_attributi` ia
+RIGHT JOIN attributi a ON a.id = ia.attributo_id
+WHERE istituto_id = (SELECT istituto_id FROM template WHERE id = $template_id) OR a.is_common = 1;");
+
+$attributes = [];
+
+if (!empty({attributesRs}) && !{attributesRs}->EOF) {
+    while (!{attributesRs}->EOF) {
+
+        $attributes[] = [
+            'id'               => {attributesRs}->fields[0], // a.id
+            'placeholder_name' => {attributesRs}->fields[1], // a.placeholder_name
+            'type_id'          => {attributesRs}->fields[2], // a.type_id
+			'name'         	   => {attributesRs}->fields[3], // a.nome
+        ];
+
+        {attributesRs}->MoveNext();
+    }
+}
+
+// JSON finale
+$attributes_json = json_encode($attributes);
+
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mapping_json'])) {
     $mapping_json = isset($_POST['mapping_json']) ? $_POST['mapping_json'] : '';
@@ -22,25 +45,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mapping_json'])) {
 $pdf_url      = '';
 $existingJson = '';
 if (!empty($template_id)) {
-    sc_select(templateRs, "SELECT form_fields FROM template WHERE id = " . (int)$template_id);
-    $form_fields_raw = null;
-    if (isset($templateRs) && $templateRs) {
-        if (isset($templateRs->fields[0])) {
-            $form_fields_raw = $templateRs->fields[0];
-        } elseif (isset($templateRs->fields[1])) {
-            $form_fields_raw = $templateRs->fields[1];
-        } elseif (isset($templateRs->field) && isset($templateRs->field['form_fields'])) {
-            $form_fields_raw = $templateRs->field['form_fields'];
-        } elseif (isset($templateRs->row) && is_array($templateRs->row) && isset($templateRs->row['form_fields'])) {
-            $form_fields_raw = $templateRs->row['form_fields'];
-        } elseif (is_array($templateRs) && isset($templateRs[0]['form_fields'])) {
-            $form_fields_raw = $templateRs[0]['form_fields'];
-        } elseif (is_array($templateRs) && isset($templateRs[0][0])) {
-            $form_fields_raw = $templateRs[0][0];
-        }
+    sc_select(templateRs, "SELECT form_fields FROM template WHERE id = " . (int)$template_id . ";");
+    if ({templateRs} !== false && !{templateRs}->EOF && isset({templateRs}->fields[0])) {
+        $form_fields_raw = {templateRs}->fields[0];
         if ($form_fields_raw !== null && trim((string)$form_fields_raw) !== '') {
             $existingJson = $form_fields_raw;
         }
+        {templateRs}->Close();
     }
 }
 
@@ -363,13 +374,7 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
     // --------------------------------------------------------------------
     // Campi predefiniti (lista statica)
     // --------------------------------------------------------------------
-    var fieldTemplates = [
-        { id: 'nome_richiedente', placeholder_name: 'nome_richiedente', type_id: 1 },
-        { id: 'cognome_richiedente', placeholder_name: 'cognome_richiedente', type_id: 1 },
-        { id: 'data_nascita', placeholder_name: 'data_nascita', type_id: 1 },
-        { id: 'flag_consenso', placeholder_name: 'flag_consenso', type_id: 2 },
-        { id: 'importo', placeholder_name: 'importo', type_id: 1 }
-    ];
+    var fieldTemplates = <?php echo $attributes_json; ?>
 
     // --------------------------------------------------------------------
     // Helper
@@ -412,7 +417,7 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
 
             var nameSpan = document.createElement('span');
             nameSpan.className = 'field-name';
-            nameSpan.textContent = tpl.placeholder_name;
+            nameSpan.textContent = tpl.name;
 
             var typeSpan = document.createElement('span');
             typeSpan.className = 'field-type';
@@ -878,3 +883,6 @@ $existingJsonForJs = ($existingJson === '' || $existingJson === null) ? 'null' :
 </body>
 </html>
 
+
+
+<?php
