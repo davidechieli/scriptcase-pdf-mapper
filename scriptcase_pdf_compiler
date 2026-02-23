@@ -1,0 +1,203 @@
+<?php
+// -------------------------------------------------------------
+// Parametri in ingresso (da variabili globali Scriptcase)
+// -------------------------------------------------------------
+// [templateId]  = id del template da usare
+// [praticaId]   = id pratica da cui leggere i valori da vw_attributes_values
+
+$templateId = [templateId];
+$praticaId  = [praticaId];
+
+sc_lookup(templatePathRs, "SELECT set_value FROM sec_settings WHERE set_name = 'templates_path'");
+$templateDir = {templatePathRs[0][0]};
+
+// -------------------------------------------------------------
+// Lettura template e campi dal DB
+// -------------------------------------------------------------
+sc_select(templateRs, "SELECT template_pdf, form_fields FROM template WHERE id = " . (int)$templateId . ";");
+
+$templateFile   = null;
+$formFieldsJson = null;
+if ({templateRs} !== false && !{templateRs}->EOF) {
+    $templateFile   = {templateRs}->fields[0];
+    $formFieldsJson = {templateRs}->fields[1];
+    {templateRs}->Close();
+}
+
+$fields = is_string($formFieldsJson) ? json_decode($formFieldsJson, true) : null;
+if (!is_array($fields)) {
+    $fields = [];
+}
+
+$templatePath = $templateDir . '/' . $templateFile;
+
+if (!file_exists($templatePath)) {
+    sc_error_message("Template PDF non trovato per template id = " . (int)$templateId);
+}
+
+createPdfFromTemplatePathBrowser($templatePath, $fields, $praticaId);
+
+/**
+ * Normalizza un PDF con Ghostscript per compatibilità con il parser free di FPDI.
+ * Ritorna il path del file temporaneo normalizzato, o null se la normalizzazione fallisce.
+ *
+ * @param string $templatePath Path assoluto al PDF originale
+ * @return string|null Path al PDF normalizzato o null
+ */
+function normalizePdfWithGhostscript($templatePath)
+{
+    if (!file_exists($templatePath) || !is_readable($templatePath)) {
+        return null;
+    }
+
+    $tempPath = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'template_' . uniqid('', true) . '.pdf';
+
+    $gsExe = (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') ? 'gswin64c' : 'gs';
+
+    $cmd = escapeshellarg($gsExe)
+        . ' -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dNOPAUSE -dQUIET -dBATCH'
+        . ' -sOutputFile=' . escapeshellarg($tempPath)
+        . ' ' . escapeshellarg($templatePath);
+
+    $output = [];
+    $returnCode = -1;
+    @exec($cmd . ' 2>&1', $output, $returnCode);
+
+    if ($returnCode === 0 && file_exists($tempPath) && filesize($tempPath) > 0) {
+        return $tempPath;
+    }
+
+    if (file_exists($tempPath)) {
+        @unlink($tempPath);
+    }
+    return null;
+}
+
+/**
+ * Crea il PDF compilato a partire dal template e dai campi; output al browser.
+ *
+ * @param string $templatePath Path al file PDF template
+ * @param array  $fields       Array di campi (da form_fields JSON)
+ * @param mixed  $praticaId    Id pratica per vw_attributes_values
+ */
+function createPdfFromTemplatePathBrowser($templatePath, array $fields, $praticaId)
+{
+    sc_include_lib("tcpdf");
+    sc_include_library("sys", "FPDI", "src/autoload.php", true, true);
+
+    if (!file_exists($templatePath)) {
+        throw new Exception("Template PDF non trovato: " . $templatePath);
+    }
+
+    $pathToUse = normalizePdfWithGhostscript($templatePath);
+    if ($pathToUse === null) {
+        $pathToUse = $templatePath;
+    }
+
+    $tempNormalizedPath = ($pathToUse !== $templatePath) ? $pathToUse : null;
+
+    try {
+        $pdf = new setasign\Fpdi\Tcpdf\Fpdi();
+
+        $pageCount = $pdf->setSourceFile($pathToUse);
+
+        for ($page = 1; $page <= $pageCount; $page++) {
+            $tplId = $pdf->importPage($page);
+            $size  = $pdf->getTemplateSize($tplId);
+
+            $pdf->AddPage($size['orientation'], [$size['width'], $size['height']]);
+            $pdf->useTemplate($tplId);
+
+            foreach ($fields as $field) {
+                if ((int)(isset($field['pagina']) ? $field['pagina'] : 0) !== $page) {
+                    continue;
+                }
+
+                if (empty($field['coordinate_mm']) || !is_array($field['coordinate_mm'])) {
+                    continue;
+                }
+
+                $c = $field['coordinate_mm'];
+
+                $x      = (float)(isset($c['x']) ? $c['x'] : 0);
+                $y      = (float)(isset($c['y']) ? $c['y'] : 0);
+                $width  = (float)(isset($c['width']) ? $c['width'] : 0);
+                $height = (float)(isset($c['height']) ? $c['height'] : 0);
+
+                $placeholderName = isset($field['placeholder_name']) ? $field['placeholder_name'] : '';
+
+                $safePlaceholder = sc_sql_injection($placeholderName);
+                $valuesSql = "
+                    SELECT value, type_id
+                    FROM vw_attributes_values
+                    WHERE pratica_id = " . (int)$praticaId . "
+                      AND placeholder_name = " . $safePlaceholder . "
+                ";
+                sc_lookup(valueRs, $valuesSql);
+
+                $attributeValue = '';
+                if (isset({valueRs[0][0]})) {
+                    $attributeValue = {valueRs[0][0]};
+                }
+
+                $typeId = isset({valueRs[0][1]}) ? {valueRs[0][1]} : '';
+                if ($typeId === 'bool') {
+                    $idx = isset($field['index']) ? (int)$field['index'] : null;
+                    if ($attributeValue == '1' && $idx === 1) $attributeValue = 'X';
+                    if ($attributeValue == '0' && $idx === 1) $attributeValue = '';
+                    if ($attributeValue == '1' && $idx === 0) $attributeValue = '';
+                    if ($attributeValue == '0' && $idx === 0) $attributeValue = 'X';
+                }
+                if ($typeId === 'enum') {
+                    $enumData = json_decode($attributeValue, true);
+                    $attributeValue = '';
+                    if (is_array($enumData) && isset($enumData[0]['entries'])) {
+                        $entries = $enumData[0]['entries'];
+                        $currentIndex = isset($field['index']) ? (int)$field['index'] : null;
+                        $arrayPos = $currentIndex !== null ? $currentIndex - 1 : -1;
+                        if ($arrayPos >= 0 && isset($entries[$arrayPos]) && isset($entries[$arrayPos]['value']) && $entries[$arrayPos]['value'] == 1) {
+                            $attributeValue = 'X';
+                        }
+                    }
+                }
+
+                $pdf->SetFont('helvetica', '', 10);
+                $pdf->SetTextColor(0, 0, 0);
+                $pdf->SetXY($x, $y);
+
+                $pdf->MultiCell(
+                    $width,
+                    $height,
+                    (string)$attributeValue,
+                    0,
+                    'C',
+                    false,
+                    1
+                );
+            }
+        }
+
+        if ($tempNormalizedPath !== null && file_exists($tempNormalizedPath)) {
+            @unlink($tempNormalizedPath);
+        }
+
+        header('Content-Type: application/pdf');
+        header('Content-Disposition: attachment; filename="documento_compilato.pdf"');
+        header('Cache-Control: private, max-age=0, must-revalidate');
+        header('Pragma: public');
+
+        $pdf->Output('documento_compilato.pdf', 'I');
+        exit;
+    } catch (Exception $e) {
+        if ($tempNormalizedPath !== null && file_exists($tempNormalizedPath)) {
+            @unlink($tempNormalizedPath);
+        }
+        $msg = $e->getMessage();
+        if (stripos($msg, 'compression') !== false || stripos($msg, 'not supported') !== false) {
+            throw new Exception(
+                "Il PDF usa una compressione non supportata dal parser. Verificare che Ghostscript sia installato e nel PATH (gs / gswin64c), oppure esportare il template in PDF 1.4. Dettaglio: " . $msg
+            );
+        }
+        throw new Exception("Errore creazione PDF da template path: " . $msg);
+    }
+}
